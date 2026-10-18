@@ -85,3 +85,40 @@ def test_report_handler_preserves_aws_embedder_when_substitute_disabled(
 
     assert handler._embedder is fallback
     assert runtime_embedder is fallback
+
+
+@pytest.mark.parametrize("fixture", ["n02-analysis-v1", "h03-report-v1", "spec004-report-v1", None])
+def test_analysis_pipeline_substitute_is_wired_only_for_n02(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fixture: str | None
+) -> None:
+    environment = {
+        "APP_ENVIRONMENT": "test",
+        "CONTROLPROOF_MODEL_SUBSTITUTE_ENABLED": "true" if fixture else "false",
+        "CONTROLPROOF_MODEL_FIXTURE_ID": fixture or "h03-report-v1",
+        "CONTROLPROOF_EXTERNAL_AI_ALLOWED": "false",
+        "AI_PROVIDER": "aws",
+        "EMBEDDING_PROVIDER": "aws",
+        "STT_PROVIDER": "disabled",
+        "TTS_PROVIDER": "text_only",
+        "BEDROCK_RUNTIME_ENDPOINT_URL": "http://127.0.0.1:4566",
+        "TRANSCRIBE_ENDPOINT_URL": "http://127.0.0.1:4566",
+        "POLLY_ENDPOINT_URL": "http://127.0.0.1:4566",
+        "GCP_DOCUMENT_AI_API_ENDPOINT": "127.0.0.1:4566",
+        "CONTROLPROOF_OBSERVER_ROOT": str(tmp_path),
+        "CONTROLPROOF_WORKER_SESSION_ID": str(uuid4()),
+        "CONTROLPROOF_WORKER_LAUNCHER_PID": "1",
+        "CONTROLPROOF_WORKER_SLOT": "0",
+    }
+    pipeline_spy = Mock(wraps=worker.SubmissionAnalysisPipeline)
+    monkeypatch.setattr(worker, "SubmissionAnalysisPipeline", pipeline_spy)
+    handler, fallback_embedder, _ = _compose_worker(monkeypatch, environment)
+    args = pipeline_spy.call_args.kwargs
+    if fixture == "n02-analysis-v1":
+        assert args["strategy_model"].fixture_id == fixture
+        assert isinstance(args["text_embedder"], ControlProofFixedEmbedder)
+        assert args["text_embedder"] is not fallback_embedder
+    else:
+        assert args["text_embedder"] is fallback_embedder
+        assert isinstance(args["strategy_model"], Mock)
+    # Report composition remains usable alongside analysis; no global model replacement.
+    assert isinstance(handler, worker.ReportRequestedEventHandler)

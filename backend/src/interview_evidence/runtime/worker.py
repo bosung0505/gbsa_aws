@@ -51,6 +51,7 @@ from interview_evidence.runtime.controlproof_consent import (
 from interview_evidence.runtime.controlproof_faults import ControlProofReportingFaultGuard
 from interview_evidence.runtime.controlproof_model_substitute import (
     controlproof_ai_isolation_digest,
+    resolve_controlproof_analysis,
     resolve_controlproof_embedder,
     resolve_controlproof_model,
     validate_controlproof_test_controls,
@@ -811,12 +812,15 @@ def create_production_worker_runtime(environment: Mapping[str, str]) -> WorkerRu
         environment,
         object_storage=aws.object_storage,
     )
+    analysis_model, analysis_embedder = resolve_controlproof_analysis(
+        environment, aws.model, aws.embedder
+    )
     analysis_pipeline = SubmissionAnalysisPipeline(
         repository=lane_b.repository,
         extractor=document_extractor,
         search_index=search_index,
-        text_embedder=aws.embedder,
-        strategy_model=aws.model,
+        text_embedder=analysis_embedder,
+        strategy_model=analysis_model,
         axis_provider=CompanyAnalysisAxisProvider(company),
         outbox=outbox,
         clock=clock,

@@ -7,16 +7,24 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from interview_evidence.runtime.controlproof_model_substitute import (
+    ControlProofAnalysisModel,
+    ControlProofFixedEmbedder,
+)
 from interview_evidence.shared.aws_clients.ports import (
     EmbeddingProviderError,
     StaticTextEmbedder,
 )
 from interview_evidence.shared.ids import FrozenClock
 from interview_evidence.shared.messaging.outbox import InMemoryOutbox
+from interview_evidence.shared.pdf_document_extraction import NativePdfTextExtractor
 from interview_evidence.shared.tenant import ActorType, TenantContext
 from interview_evidence.submission_analysis.adapters.search import InMemorySearchIndex
 from interview_evidence.submission_analysis.application.strategy_prompt import (
     strategy_task_payload_of,
+)
+from interview_evidence.submission_analysis.application.strategy_service import (
+    StrategyGenerationError,
 )
 from interview_evidence.submission_analysis.domain.git_analysis import (
     CommitIdentityInput,
@@ -1173,6 +1181,98 @@ def _pdf_submission(submission_id: UUID, filename: str) -> Submission:
         media_type="application/pdf",
         created_at=NOW,
     )
+
+
+@pytest.mark.parametrize("invalid_response", [False, True])
+def test_n02_native_pdf_to_validated_strategy_and_idempotent_replay(invalid_response) -> None:
+    """Real PDF extraction, pipeline, validation and persistence; no external AI or ready rows."""
+    from io import BytesIO
+
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+    )
+    stream = DecodedStreamObject()
+    stream.set_data(
+        b"BT /F1 12 Tf 72 720 Td (Synthetic resume describing a local test harness "
+        b"project and documented results. No real person.) Tj ET"
+    )
+    page[NameObject("/Contents")] = stream
+    content = BytesIO()
+    writer.write(content)
+
+    class NativeExtractor:
+        extractor_version = NativePdfTextExtractor.extractor_version
+
+        def extract(self, _context, _source_uri):
+            return NativePdfTextExtractor().extract_content(content.getvalue())
+
+    class InvalidModel:
+        def generate(self, _context, _model_input):
+            return {"verification_points": "invalid output"}
+
+    repository = InMemorySubmissionRepository()
+    repository.save_submission(_context(), _pdf_submission(SUBMISSION_ID, "synthetic.pdf"))
+    outbox = InMemoryOutbox()
+    pipeline = SubmissionAnalysisPipeline(
+        repository=repository,
+        extractor=NativeExtractor(),
+        search_index=InMemorySearchIndex(),
+        text_embedder=ControlProofFixedEmbedder(),
+        strategy_model=InvalidModel() if invalid_response else ControlProofAnalysisModel(),
+        axis_provider=StaticAxisProvider(),
+        outbox=outbox,
+        clock=FrozenClock(NOW),
+    )
+    job = AnalysisJob(
+        submission_id=SUBMISSION_ID,
+        invitation_id=INVITATION_ID,
+        applicant_id=APPLICANT_ID,
+        analysis_version=1,
+        source_type=SourceType.PDF,
+        source_object_id=SUBMISSION_ID,
+        idempotency_key="n02-native-analysis",
+    )
+    result = pipeline.process(_context(), job)
+    assert result.status is JobStatus.READY
+    assert pipeline.process(_context(), job).analysis_id == result.analysis_id
+    assert len(repository.list_analyses(_context(), frozenset({SUBMISSION_ID}))) == 1
+    if invalid_response:
+        with pytest.raises(StrategyGenerationError):
+            pipeline.finalize_invitation(
+                _context(),
+                invitation_id=INVITATION_ID,
+                applicant_id=APPLICANT_ID,
+                submission_ids=frozenset({SUBMISSION_ID}),
+            )
+        assert repository.latest_strategy(_context(), INVITATION_ID) is None
+        assert not any(event.event_type == "strategy.ready" for event in outbox.pending())
+        return
+    for _ in range(2):
+        assert pipeline.finalize_invitation(
+            _context(),
+            invitation_id=INVITATION_ID,
+            applicant_id=APPLICANT_ID,
+            submission_ids=frozenset({SUBMISSION_ID}),
+        )
+    strategy = repository.latest_strategy(_context(), INVITATION_ID)
+    assert strategy is not None
+    assert strategy.status.value == "ready"
+    assert {p.criterion_id for p in strategy.verification_points} == {CRITERION_ID}
+    chunk_ids = {chunk.chunk_id for chunk in repository.list_chunks(_context(), APPLICANT_ID)}
+    assert {sid for point in strategy.verification_points for sid in point.source_ids} <= chunk_ids
+    assert sum(event.event_type == "strategy.ready" for event in outbox.pending()) == 1
 
 
 def test_multiple_submissions_build_one_combined_strategy_after_analysis() -> None:

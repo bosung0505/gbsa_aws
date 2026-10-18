@@ -27,7 +27,15 @@ FIXTURE_DIGEST = hashlib.sha256(FIXTURE_SEED.encode("utf-8")).hexdigest()
 SPEC004_FIXTURE_ID = "spec004-report-v1"
 SPEC004_FIXTURE_SEED = "controlproof:spec004-report-v1"
 SPEC004_FIXTURE_DIGEST = hashlib.sha256(SPEC004_FIXTURE_SEED.encode("utf-8")).hexdigest()
-_FIXTURE_DIGESTS = {FIXTURE_ID: FIXTURE_DIGEST, SPEC004_FIXTURE_ID: SPEC004_FIXTURE_DIGEST}
+N02_ANALYSIS_FIXTURE_ID = "n02-analysis-v1"
+N02_ANALYSIS_FIXTURE_DIGEST = hashlib.sha256(
+    f"controlproof:{N02_ANALYSIS_FIXTURE_ID}".encode()
+).hexdigest()
+_FIXTURE_DIGESTS = {
+    FIXTURE_ID: FIXTURE_DIGEST,
+    SPEC004_FIXTURE_ID: SPEC004_FIXTURE_DIGEST,
+    N02_ANALYSIS_FIXTURE_ID: N02_ANALYSIS_FIXTURE_DIGEST,
+}
 ALLOWED_ENVIRONMENTS = frozenset({"local", "test"})
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _AI_ENDPOINTS = (
@@ -335,6 +343,47 @@ class ControlProofSpec004Model:
                 temporary.unlink(missing_ok=True)
 
 
+class ControlProofAnalysisModel:
+    """Opt-in N-02 strategy fixture; product validation and persistence still run normally."""
+
+    fixture_id = N02_ANALYSIS_FIXTURE_ID
+    fixture_digest = N02_ANALYSIS_FIXTURE_DIGEST
+
+    def generate(self, context: TenantContext, model_input: Mapping[str, Any]) -> Mapping[str, Any]:
+        require_tenant_context(context)
+        payload = _task_payload(model_input)
+        if payload.get("task") != "build_interview_strategy":
+            return ControlProofFixedModel().generate(context, model_input)
+        try:
+            criteria = payload["provided_criterion_ids"]
+            sources = payload["provided_source_candidates"]
+            if not isinstance(criteria, list) or not criteria:
+                raise ValueError("strategy requires criterion IDs")
+            if not isinstance(sources, list) or not sources:
+                raise ValueError("strategy requires source candidates")
+            criterion_ids = tuple(dict.fromkeys(str(UUID(item)) for item in criteria))
+            source_ids = tuple(dict.fromkeys(str(UUID(item["source_id"])) for item in sources))
+        except (KeyError, TypeError, AttributeError, ValueError) as error:
+            raise ValueError("invalid N-02 strategy input axes") from error
+        return {
+            "common_topics": ["제출 자료에 기록된 프로젝트와 본인 기여 확인"],
+            "verification_points": [
+                {
+                    "criterion_id": criterion_id,
+                    "prompt": "제출 자료의 프로젝트에서 맡은 역할과 판단 근거를 설명해 주세요.",
+                    "source_ids": [source_ids[index % len(source_ids)]],
+                }
+                for index, criterion_id in enumerate(criterion_ids)
+            ],
+            "follow_up_directions": {
+                criterion_id: ["자료에 기록된 선택의 이유와 결과를 확인합니다."]
+                for criterion_id in criterion_ids
+            },
+            "time_budget": {"total_seconds": 1800},
+            "required_evidence_plan": {criterion_id: 1 for criterion_id in criterion_ids},
+        }
+
+
 class ControlProofFixedEmbedder:
     """Deterministic local vector source for ControlProof-only report projection."""
 
@@ -367,6 +416,8 @@ def resolve_controlproof_model(
     if _requested_fixture(environment) == SPEC004_FIXTURE_ID:
         observer_root = environment.get("CONTROLPROOF_OBSERVER_ROOT", "").strip()
         return ControlProofSpec004Model(Path(observer_root) if observer_root else None)
+    if _requested_fixture(environment) == N02_ANALYSIS_FIXTURE_ID:
+        return ControlProofAnalysisModel()
     return ControlProofFixedModel()
 
 
@@ -379,6 +430,16 @@ def resolve_controlproof_embedder(
         return fallback
     _requested_fixture(environment)
     return ControlProofFixedEmbedder()
+
+
+def resolve_controlproof_analysis(
+    environment: Mapping[str, str], model: Any, embedder: Any
+) -> tuple[Any, Any]:
+    """Keep legacy/production routes intact; replace analysis only for the N-02 fixture."""
+    validate_controlproof_test_controls(environment)
+    if not _enabled(environment) or _requested_fixture(environment) != N02_ANALYSIS_FIXTURE_ID:
+        return model, embedder
+    return ControlProofAnalysisModel(), ControlProofFixedEmbedder()
 
 
 def controlproof_health(environment: Mapping[str, str]) -> dict[str, Any]:
