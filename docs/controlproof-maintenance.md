@@ -1,5 +1,17 @@
 # ControlProof maintenance checkpoint — 2026-10-19
 
+Later sharing decision (2026-10-19, ControlProof D-029): the user requested sharing reviewed actual
+evidence and lineage with the code so teammates can view the same result snapshot. The exclusion
+of all new bundles below describes the preceding publication checkpoint, not a continuing ban.
+Raw probes/.env/credentials remain excluded; preserve original bytes and source SHAs. Policy and
+preparation are documented in the sibling ControlProof repository's
+`docs/research/Run_Record_Sharing_Preparation.md`. Subsequent Spec008 implements the shared snapshot
+(25 actual Runs/600 files), read-only default viewer and isolated Git clone validation. See the sibling
+ControlProof `review-data/README.md` and Spec008 validation. Sharing a past Run is not independent re-execution. No WhyYou code change is needed
+for the policy update or for reading an existing sealed result.
+ControlProof shared-view implementation/data publication checkpoint: `b76af4c8daeeadbb5aa7c7e40a4d9365e33ad08b`
+on `bosung0505/AI_Compliance_SaaS_controlproof` / `fixes-and-remaining-work`.
+
 User authorized committing/pushing the completed work on the existing fixes-and-remaining-work
 branch in both repositories. WhyYou publishes to the personal fork bosung0505/gbsa_aws; upstream
 main remains unchanged. No new publication branch is used. Runtime probes/new bundles/.env/credentials
