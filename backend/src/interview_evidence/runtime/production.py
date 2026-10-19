@@ -80,6 +80,7 @@ from interview_evidence.recruiting_assistant.api import create_assistant_router
 from interview_evidence.recruiting_assistant.application import (
     AssistantAnswerService,
     AssistantSearchService,
+    ReadOnlyRecruitingPipelineReader,
     ReportSearchProjector,
 )
 from interview_evidence.recruiting_assistant.repository import (
@@ -112,6 +113,7 @@ from interview_evidence.runtime.controlproof_consent import (
 )
 from interview_evidence.runtime.controlproof_model_substitute import (
     controlproof_health,
+    resolve_controlproof_assistant,
     validate_controlproof_test_controls,
 )
 from interview_evidence.runtime.email import create_local_email_sender
@@ -371,13 +373,16 @@ def create_production_runtime(
         idempotency=resource_idempotency,
     )
     assistant_documents = SQLAlchemyAssistantDocumentRepository(session)
-    assistant_projector = ReportSearchProjector(assistant_documents, embedder)
+    assistant_model, assistant_embedder = resolve_controlproof_assistant(
+        environment, model, embedder
+    )
+    assistant_projector = ReportSearchProjector(assistant_documents, assistant_embedder)
     assistant_search = AssistantSearchService(
         assistant_documents,
-        embedder,
+        assistant_embedder,
         minimum_score=float(environment.get("ASSISTANT_MIN_RELEVANCE_SCORE", "0")),
     )
-    assistant_answers = AssistantAnswerService(assistant_search, model)
+    assistant_answers = AssistantAnswerService(assistant_search, assistant_model)
     base_reporting_public = ReportingPublic(
         repository=base_lane_d.repository,
         deletion_service=base_lane_d.deletion_service,
@@ -529,7 +534,7 @@ def create_production_runtime(
                 answer_service=assistant_answers,
                 audit=audit,
                 clock=clock,
-                pipeline_reader=lane_a.hiring_service,
+                pipeline_reader=ReadOnlyRecruitingPipelineReader(lane_a.repository),
             ),
         ],
         readiness=readiness,

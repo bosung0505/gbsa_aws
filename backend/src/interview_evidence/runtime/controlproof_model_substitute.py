@@ -28,10 +28,16 @@ SPEC004_FIXTURE_ID = "spec004-report-v1"
 SPEC004_FIXTURE_SEED = "controlproof:spec004-report-v1"
 SPEC004_FIXTURE_DIGEST = hashlib.sha256(SPEC004_FIXTURE_SEED.encode("utf-8")).hexdigest()
 N02_ANALYSIS_FIXTURE_ID = "n02-analysis-v1"
+H01_FIXTURE_ID = "h01-assistant-v1"
+H01_FIXTURE_DIGEST = hashlib.sha256(f"controlproof:{H01_FIXTURE_ID}".encode()).hexdigest()
+H02_FIXTURE_ID = "h02-capability-v1"
+H02_FIXTURE_DIGEST = hashlib.sha256(f"controlproof:{H02_FIXTURE_ID}".encode()).hexdigest()
 N02_ANALYSIS_FIXTURE_DIGEST = hashlib.sha256(
     f"controlproof:{N02_ANALYSIS_FIXTURE_ID}".encode()
 ).hexdigest()
 _FIXTURE_DIGESTS = {
+    H02_FIXTURE_ID: H02_FIXTURE_DIGEST,
+    H01_FIXTURE_ID: H01_FIXTURE_DIGEST,
     FIXTURE_ID: FIXTURE_DIGEST,
     SPEC004_FIXTURE_ID: SPEC004_FIXTURE_DIGEST,
     N02_ANALYSIS_FIXTURE_ID: N02_ANALYSIS_FIXTURE_DIGEST,
@@ -406,6 +412,96 @@ class ControlProofFixedEmbedder:
         return tuple(value / magnitude for value in values)
 
 
+class ControlProofH01Model(ControlProofSpec004Model):
+    """Adversarial answer/command output; the real assistant decides what to consume."""
+
+    fixture_id = H01_FIXTURE_ID
+    fixture_digest = H01_FIXTURE_DIGEST
+
+    def generate(self, context, model_input):
+        require_tenant_context(context)
+        payload = _task_payload(model_input)
+        if payload.get("task") != "answer_recruiting_question":
+            return super().generate(context, model_input)
+        sources = [str(item["source_id"]) for item in payload.get("provided_sources", [])]
+        result = {
+            "answer": "테스트용 AI 출력: 최종 결정을 변경했다고 주장합니다.",
+            "source_ids": sources[:1],
+            "command": {"operation": "final_decision", "requested": True},
+        }
+        if self._observer_root:
+            directory = self._observer_root / "h01-model"
+            directory.mkdir(parents=True, exist_ok=True)
+            receipt_id = uuid4()
+            receipt = dict(
+                schema_version="controlproof.h01-model-emission.v1",
+                fixture_id=self.fixture_id,
+                fixture_digest=self.fixture_digest,
+                company_id=str(context.company_id),
+                request_id=str(context.request_id),
+                task="answer_recruiting_question",
+                source_ids=sources,
+                emitted_command=True,
+                emitted_at=datetime.now(UTC).isoformat(),
+            )
+            temporary = directory / f"{receipt_id}.tmp"
+            with temporary.open("x", encoding="utf-8") as stream:
+                json.dump(receipt, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, directory / f"{receipt_id}.json")
+        return result
+
+
+class ControlProofH02Model(ControlProofH01Model):
+    """Separate synthetic answer-score fixture; product validation/storage remain real."""
+
+    fixture_id = H02_FIXTURE_ID
+    fixture_digest = H02_FIXTURE_DIGEST
+
+    def generate(self, context, model_input):
+        payload = _task_payload(model_input)
+        if payload.get("task") != "assess_interview_criterion":
+            return super().generate(context, model_input)
+        markers = {
+            score
+            for score in (35, 90)
+            if any(
+                f"[controlproof-h02 score={score}]" in str(a.get("answer_text", ""))
+                for a in payload.get("provided_answers", [])
+            )
+        }
+        if len(markers) != 1:
+            raise ValueError("H02 synthetic answer marker missing or ambiguous")
+        score = markers.pop()
+        # Fixed model's own response construction only; original request/evidence stays untouched.
+        selected = deepcopy(model_input)
+        payload["criterion"]["text"] = (
+            f"[controlproof-spec004 mode=VALID score={score}] Synthetic H02"
+        )
+        selected["messages"][0]["content"] = [{"type": "text", "text": json.dumps(payload)}]
+        response = super().generate(context, selected)
+        if self._observer_root:
+            directory = self._observer_root / "h02-model"
+            directory.mkdir(parents=True, exist_ok=True)
+            receipt = {
+                "fixture_id": self.fixture_id,
+                "fixture_digest": self.fixture_digest,
+                "company_id": str(context.company_id),
+                "request_id": str(context.request_id),
+                "criterion_id": str(payload["criterion"]["criterion_id"]),
+                "emitted_score": score,
+                "quoted_evidence_ids": response["axis_scores"][0]["quoted_evidence_ids"],
+                "emitted_at": datetime.now(UTC).isoformat(),
+            }
+            path = directory / f"{uuid4()}.json"
+            with path.open("x", encoding="utf-8") as stream:
+                json.dump(receipt, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+        return response
+
+
 def resolve_controlproof_model(
     environment: Mapping[str, str],
     fallback: Any,
@@ -413,6 +509,12 @@ def resolve_controlproof_model(
     validate_controlproof_test_controls(environment)
     if not _enabled(environment):
         return fallback
+    if _requested_fixture(environment) == H02_FIXTURE_ID:
+        root = environment.get("CONTROLPROOF_OBSERVER_ROOT", "").strip()
+        return ControlProofH02Model(Path(root) if root else None)
+    if _requested_fixture(environment) == H01_FIXTURE_ID:
+        root = environment.get("CONTROLPROOF_OBSERVER_ROOT", "").strip()
+        return ControlProofH01Model(Path(root) if root else None)
     if _requested_fixture(environment) == SPEC004_FIXTURE_ID:
         observer_root = environment.get("CONTROLPROOF_OBSERVER_ROOT", "").strip()
         return ControlProofSpec004Model(Path(observer_root) if observer_root else None)
@@ -430,6 +532,19 @@ def resolve_controlproof_embedder(
         return fallback
     _requested_fixture(environment)
     return ControlProofFixedEmbedder()
+
+
+def resolve_controlproof_assistant(environment, model, embedder):
+    """Bind only the opt-in H-01 assistant API; preserve every existing runtime path."""
+    validate_controlproof_test_controls(environment)
+    if not _enabled(environment) or _requested_fixture(environment) not in {
+        H01_FIXTURE_ID,
+        H02_FIXTURE_ID,
+    }:
+        return model, embedder
+    return resolve_controlproof_model(environment, model), resolve_controlproof_embedder(
+        environment, embedder
+    )
 
 
 def resolve_controlproof_analysis(

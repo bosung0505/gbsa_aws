@@ -395,3 +395,48 @@ def test_legacy_fixed_decision_remains_readable_during_migration() -> None:
     assert projection is not None
     assert projection.human_decision_status == "hold"
     session.close()
+
+
+@pytest.mark.parametrize("actor_type", [ActorType.SYSTEM, ActorType.APPLICANT])
+@pytest.mark.parametrize("target_stage_id", [STAGE_ID, REJECT_STAGE_ID])
+@pytest.mark.parametrize("require_final_report", [False, True])
+def test_nonhuman_cannot_move_to_final_stage_even_through_internal_service(
+    actor_type, target_stage_id, require_final_report
+):
+    repository = BatchDecisionRepository()
+    service = HiringService(repository, object(), FrozenClock(NOW), object())
+    actor = context().model_copy(update={"actor_type": actor_type})
+    with pytest.raises(PermissionError, match="final stage requires a human company user"):
+        service.move_applicants(
+            actor,
+            position_id=POSITION_ID,
+            target_stage_id=target_stage_id,
+            moves=(ApplicantPipelineMove(INVITATION_ID, 1),),
+            invitation_reviews=MissingReportResolver(),
+            require_final_report=require_final_report,
+        )
+    assert repository.invitation.recruiting_stage_id == REVIEW_STAGE_ID
+    assert repository.invitation.pipeline_row_version == 1
+
+
+def test_system_nonfinal_pipeline_work_is_still_allowed():
+    repository = BatchDecisionRepository()
+    nonfinal = UUID(int=999)
+    repository.stages = (
+        *repository.stages,
+        RecruitingStage(
+            recruiting_stage_id=nonfinal,
+            company_id=COMPANY_ID,
+            position_id=POSITION_ID,
+            name="보류",
+            sort_order=3,
+        ),
+    )
+    service = HiringService(repository, object(), FrozenClock(NOW), object())
+    service.move_applicants(
+        context().model_copy(update={"actor_type": ActorType.SYSTEM}),
+        position_id=POSITION_ID,
+        target_stage_id=nonfinal,
+        moves=(ApplicantPipelineMove(INVITATION_ID, 1),),
+    )
+    assert repository.invitation.recruiting_stage_id == nonfinal

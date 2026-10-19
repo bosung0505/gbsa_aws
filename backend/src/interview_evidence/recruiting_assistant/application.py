@@ -6,6 +6,8 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import ValidationError
 
+from interview_evidence.company_management.domain.hiring import Invitation, RecruitingStage
+from interview_evidence.company_management.repositories.postgres import CompanyRepository
 from interview_evidence.recruiting_assistant.domain import (
     AssistantSearchDocument,
     AssistantSearchResult,
@@ -20,6 +22,23 @@ from interview_evidence.recruiting_assistant.repository import (
 from interview_evidence.reporting.domain.report import Report, ReportItem
 from interview_evidence.shared.aws_clients.ports import AIModel, TextEmbedder
 from interview_evidence.shared.tenant import TenantContext
+
+
+class ReadOnlyRecruitingPipelineReader:
+    """Read existing pipeline facts without creating stages or backfilling decisions."""
+
+    def __init__(self, repository: CompanyRepository) -> None:
+        self._repository = repository
+
+    def list_recruiting_stages(
+        self, context: TenantContext, position_id: UUID | None = None
+    ) -> tuple[RecruitingStage, ...]:
+        return self._repository.list_recruiting_stages(context, position_id)
+
+    def list_invitations(
+        self, context: TenantContext, position_id: UUID
+    ) -> tuple[Invitation, ...]:
+        return self._repository.list_invitations(context, position_id)
 
 
 class ReportSearchProjector:

@@ -19,7 +19,7 @@ from interview_evidence.company_management.domain.hiring import (
 from interview_evidence.company_management.repositories.postgres import CompanyRepository
 from interview_evidence.shared.idempotency import ResourceIdempotencyStore
 from interview_evidence.shared.ids import Clock, new_uuid7
-from interview_evidence.shared.tenant import TenantContext
+from interview_evidence.shared.tenant import ActorType, TenantContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,6 +310,8 @@ class HiringService:
         stages = self.ensure_default_stages(context, position_id)
         target_stage = _stage_in_position(stages, target_stage_id, position_id)
         final_stage = target_stage.name in {"최종합격", "불합격"}
+        if final_stage and context.actor_type is not ActorType.COMPANY_USER:
+            raise PermissionError('final stage requires a human company user')
         pending: list[Invitation] = []
         for move in moves:
             invitation = self._repository.get_invitation_for_update(
